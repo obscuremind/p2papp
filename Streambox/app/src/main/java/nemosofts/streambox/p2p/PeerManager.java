@@ -262,7 +262,14 @@ public class PeerManager {
         for (Map.Entry<String, SegmentRequest> e : inflight.entrySet()) {
             SegmentRequest state = e.getValue();
             if (peerId.equals(state.peerId)) {
-                if (inflight.remove(e.getKey(), state)) {
+                boolean retried;
+                synchronized (state) {
+                    state.cancelTimeout();
+                    state.triedPeers.add(peerId);
+                    state.peerId = null;
+                    retried = attemptSegmentRequest(e.getKey(), state);
+                }
+                if (!retried && inflight.remove(e.getKey(), state)) {
                     state.failAll();
                 }
             }
@@ -304,8 +311,14 @@ public class PeerManager {
 
     private static class SegmentRequest {
         private final CopyOnWriteArrayList<SegmentCallback> callbacks = new CopyOnWriteArrayList<>();
+        private final Set<String> triedPeers = new HashSet<>();
         volatile String peerId;
         volatile ScheduledFuture<?> timeout;
+        long timeoutMs;
+
+        SegmentRequest(long timeoutMs) {
+            this.timeoutMs = timeoutMs;
+        }
 
         void addCallback(SegmentCallback cb) { callbacks.add(cb); }
 
@@ -322,6 +335,7 @@ public class PeerManager {
             callbacks.clear();
             cancelTimeout();
             peerId = null;
+            triedPeers.clear();
             for (SegmentCallback cb : arr) {
                 cb.onResult(true, data);
             }
@@ -332,6 +346,7 @@ public class PeerManager {
             callbacks.clear();
             cancelTimeout();
             peerId = null;
+            triedPeers.clear();
             for (SegmentCallback cb : arr) {
                 cb.onResult(false, null);
             }
@@ -339,47 +354,64 @@ public class PeerManager {
     }
 
     public void requestSegment(SegmentKey key, long timeoutMs, SegmentCallback cb) {
-        SegmentRequest state = inflight.computeIfAbsent(key.uri, uri -> new SegmentRequest());
+        SegmentRequest state = inflight.computeIfAbsent(key.uri, uri -> new SegmentRequest(timeoutMs));
+        boolean dispatched;
         synchronized (state) {
             state.addCallback(cb);
+            if (timeoutMs > state.timeoutMs) {
+                state.timeoutMs = timeoutMs;
+            }
             if (state.peerId != null) {
                 return;
             }
+            dispatched = attemptSegmentRequest(key.uri, state);
+        }
+        if (!dispatched && inflight.remove(key.uri, state)) {
+            state.failAll();
+        }
+    }
 
-            Set<String> tried = new HashSet<>();
-            while (true) {
-                String best = selectBestPeer(tried);
-                if (best == null) {
-                    inflight.remove(key.uri, state);
-                    state.failAll();
-                    return;
-                }
-
-                DataChannel dc = chans.get(best);
-                if (dc == null || dc.state() != DataChannel.State.OPEN) {
-                    tried.add(best);
-                    continue;
-                }
-
-                state.peerId = best;
-                MsgNeed need = new MsgNeed(key.uri);
-                byte[] payload = gson.toJson(need).getBytes();
-                boolean sentOk = dc.send(new DataChannel.Buffer(ByteBuffer.wrap(payload), false));
-                if (!sentOk) {
-                    tried.add(best);
-                    state.peerId = null;
-                    continue;
-                }
-
-                state.timeout = scheduler.schedule(() -> onRequestTimeout(key.uri, state),
-                        timeoutMs, TimeUnit.MILLISECONDS);
-                return;
+    private boolean attemptSegmentRequest(String uri, SegmentRequest state) {
+        while (true) {
+            String best = selectBestPeer(state.triedPeers);
+            if (best == null) {
+                return false;
             }
+
+            DataChannel dc = chans.get(best);
+            if (dc == null || dc.state() != DataChannel.State.OPEN) {
+                state.triedPeers.add(best);
+                continue;
+            }
+
+            MsgNeed need = new MsgNeed(uri);
+            byte[] payload = gson.toJson(need).getBytes();
+            boolean sentOk = dc.send(new DataChannel.Buffer(ByteBuffer.wrap(payload), false));
+            if (!sentOk) {
+                state.triedPeers.add(best);
+                continue;
+            }
+
+            state.peerId = best;
+            state.triedPeers.add(best);
+            state.timeout = scheduler.schedule(() -> onRequestTimeout(uri, state),
+                    state.timeoutMs, TimeUnit.MILLISECONDS);
+            return true;
         }
     }
 
     private void onRequestTimeout(String uri, SegmentRequest state) {
-        if (inflight.remove(uri, state)) {
+        boolean retried;
+        synchronized (state) {
+            if (state.peerId == null) {
+                return;
+            }
+            state.triedPeers.add(state.peerId);
+            state.peerId = null;
+            state.timeout = null;
+            retried = attemptSegmentRequest(uri, state);
+        }
+        if (!retried && inflight.remove(uri, state)) {
             state.failAll();
         }
     }
@@ -432,114 +464,16 @@ public class PeerManager {
                 boolean ok = piece.ok && piece.bytes != null && piece.bytes.length > 0;
                 if (ok) {
                     recv.merge(from, (long) piece.bytes.length, Long::sum);
-                }
-                if (inflight.remove(piece.uri, state)) {
-                    if (ok) {
+                    if (inflight.remove(piece.uri, state)) {
                         state.complete(piece.bytes);
-                    } else {
-                        state.failAll();
                     }
-                }
-                if (statsListener != null) statsListener.run();
-                break;
-            }
-            case "hello": {
-                MsgHello h = gson.fromJson(s, MsgHello.class);
-                country.put(from, h.country == null || h.country.isEmpty() ? "??" : h.country);
-                notifyPeersChanged();
-                break;
-            }
-            default:
-                break;
-        }
-    }
-
-    private static class Sig {
-        String type;
-        String streamId;
-        String senderId;
-        Payload payload;
-        Sig(String type, String streamId, String senderId, Payload payload) {
-            this.type = type; this.streamId = streamId; this.senderId = senderId; this.payload = payload;
-        }
-    }
-    private static class Payload {
-        String to;
-        String sdp;
-        IceCandidate cand;
-        String msg;
-        Payload(String to, String sdp, IceCandidate cand, String msg) {
-            this.to = to; this.sdp = sdp; this.cand = cand; this.msg = msg;
-        }
-    }
-
-    private static class MsgPing { String type="ping"; long ts; MsgPing(long ts){this.ts=ts;} }
-    private static class MsgPong { String type="pong"; long ts; MsgPong(long ts){this.ts=ts;} }
-    private static class MsgNeed { String type="need"; String uri; MsgNeed(String uri){this.uri=uri;} }
-    private static class MsgPiece {
-        String type="piece";
-        String uri;
-        byte[] bytes;
-        boolean ok = true;
-        MsgPiece() {}
-        MsgPiece(String uri, byte[] bytes){this.uri=uri;this.bytes=bytes; this.ok = bytes != null && bytes.length > 0;}
-        static MsgPiece success(String uri, byte[] bytes) { return new MsgPiece(uri, bytes); }
-        static MsgPiece failure(String uri) {
-            MsgPiece p = new MsgPiece(uri, null);
-            p.ok = false;
-            return p;
-        }
-    }
-    private static class MsgHello { String type="hello"; String country; MsgHello(){} MsgHello(String country){this.country=country;} }
-    private static class MsgEnvelope { String type; }
-
-    static class HttpFetch {
-        private static final OkHttpClient CLIENT = new OkHttpClient();
-        static byte[] fetchBytes(String url) {
-            try {
-                okhttp3.Request req = new okhttp3.Request.Builder().url(url).build();
-                try (okhttp3.Response res = CLIENT.newCall(req).execute()) {
-                    if (!res.isSuccessful() || res.body() == null) return null;
-                    return res.body().bytes();
-                }
-            } catch (Exception e) {
-                return null;
-            }
-        }
-    }
-
-    private static class SimpleSdpObs implements SdpObserver {
-        private final String tag;
-        SimpleSdpObs(String tag) { this.tag = tag; }
-        @Override public void onCreateSuccess(SessionDescription sessionDescription) {}
-        @Override public void onSetSuccess() {}
-        @Override public void onCreateFailure(String s) { Log.e("SDP", tag + " onCreateFailure " + s); }
-        @Override public void onSetFailure(String s) { Log.e("SDP", tag + " onSetFailure " + s); }
-    }
-
-    public int getPeerCount() { return chans.size(); }
-    public long getAverageRtt() {
-        if (lastRtts.isEmpty()) return 0;
-        long sum = 0;
-        int n = 0;
-        for (Long v : lastRtts.values()) { sum += v; n++; }
-        return n == 0 ? 0 : sum / n;
-    }
-    public long getTotalRecv() {
-        long sum = 0;
-        for (Long v : recv.values()) sum += v;
-        return sum;
-    }
-    public long getTotalSent() {
-        long sum = 0;
-        for (Long v : sent.values()) sum += v;
-        return sum;
-    }
-    public java.util.Map<String,Integer> getCountryCounts() {
-        java.util.Map<String,Integer> map = new java.util.HashMap<>();
-        for (String c : country.values()) {
-            map.put(c, map.getOrDefault(c, 0) + 1);
-        }
-        return map;
-    }
-}
+                } else {
+                    boolean retried;
+                    synchronized (state) {
+                        state.cancelTimeout();
+                        state.triedPeers.add(from);
+                        state.peerId = null;
+                        retried = attemptSegmentRequest(piece.uri, state);
+                    }
+                    if (!retried && inflight.remove(piece.uri, state)) {
+                        state.failAll();
