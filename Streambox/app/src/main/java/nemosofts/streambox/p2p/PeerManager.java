@@ -133,8 +133,6 @@ public class PeerManager {
 
         PeerConnection pc = factory.createPeerConnection(cfg, new PeerConnection.Observer() {
             @Override public void onIceCandidate(IceCandidate candidate) {
-                    // pass
-
                 send(new Sig("candidate", streamId, selfId, new Payload(peerId, null, candidate, null)));
             }
             @Override public void onConnectionChange(PeerConnection.PeerConnectionState newState) {
@@ -152,7 +150,7 @@ public class PeerManager {
             @Override public void onIceConnectionChange(PeerConnection.IceConnectionState newState) {}
             @Override public void onIceConnectionReceivingChange(boolean b) {}
             @Override public void onIceGatheringChange(PeerConnection.IceGatheringState newState) {}
-                @Override public void onIceCandidatesRemoved(IceCandidate[] candidates) {}
+            @Override public void onIceCandidatesRemoved(IceCandidate[] candidates) {}
             @Override public void onAddStream(org.webrtc.MediaStream stream) {}
             @Override public void onRemoveStream(org.webrtc.MediaStream stream) {}
             @Override public void onRenegotiationNeeded() {}
@@ -519,30 +517,29 @@ public class PeerManager {
         @Override public void onSetFailure(String s) { Log.e("SDP", tag + " onSetFailure " + s); }
     }
 
-        public int getPeerCount() { return chans.size(); }
-        public long getAverageRtt() {
-            if (lastRtts.isEmpty()) return 0;
-            long sum = 0;
-            int n = 0;
-            for (Long v : lastRtts.values()) { sum += v; n++; }
-            return n == 0 ? 0 : sum / n;
+    public int getPeerCount() { return chans.size(); }
+    public long getAverageRtt() {
+        if (lastRtts.isEmpty()) return 0;
+        long sum = 0;
+        int n = 0;
+        for (Long v : lastRtts.values()) { sum += v; n++; }
+        return n == 0 ? 0 : sum / n;
+    }
+    public long getTotalRecv() {
+        long sum = 0;
+        for (Long v : recv.values()) sum += v;
+        return sum;
+    }
+    public long getTotalSent() {
+        long sum = 0;
+        for (Long v : sent.values()) sum += v;
+        return sum;
+    }
+    public java.util.Map<String,Integer> getCountryCounts() {
+        java.util.Map<String,Integer> map = new java.util.HashMap<>();
+        for (String c : country.values()) {
+            map.put(c, map.getOrDefault(c, 0) + 1);
         }
-        public long getTotalRecv() {
-            long sum = 0;
-            for (Long v : recv.values()) sum += v;
-            return sum;
-        }
-        public long getTotalSent() {
-            long sum = 0;
-            for (Long v : sent.values()) sum += v;
-            return sum;
-        }
-        public java.util.Map<String,Integer> getCountryCounts() {
-            java.util.Map<String,Integer> map = new java.util.HashMap<>();
-            for (String c : country.values()) {
-                map.put(c, map.getOrDefault(c, 0) + 1);
-            }
-            return map;
-        }
-    
+        return map;
+    }
 }
