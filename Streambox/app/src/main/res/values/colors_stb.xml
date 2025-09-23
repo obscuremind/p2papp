@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="stb_gradient_start">#11151C</color>
+    <color name="stb_gradient_end">#080A0F</color>
+    <color name="stb_header_background">#1F2A38</color>
+    <color name="stb_status_bar">#0B0F16</color>
+    <color name="stb_navigation_bar">#05070B</color>
+    <color name="stb_text_heading">#F0F4FF</color>
+    <color name="stb_text_body">#C6D0DE</color>
+    <color name="stb_header_border">#332F455D</color>
+</resources>

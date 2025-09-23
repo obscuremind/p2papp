@@ -12,6 +12,7 @@ import com.onesignal.OneSignal;
 import nemosofts.streambox.BuildConfig;
 import nemosofts.streambox.R;
 import nemosofts.streambox.Util.helper.DBHelper;
+import nemosofts.streambox.Util.ui.StbUiCoordinator;
 
 public class MyApplication extends Application {
 
@@ -35,6 +36,8 @@ public class MyApplication extends Application {
         // OneSignal Initialization
         OneSignal.initWithContext(this);
         OneSignal.setAppId(getString(R.string.onesignal_app_id));
+
+        StbUiCoordinator.install(this);
     }
 
     @Override
