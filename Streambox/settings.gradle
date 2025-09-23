@@ -4,6 +4,11 @@ pluginManagement {
         mavenCentral()
         gradlePluginPortal()
     }
+    plugins {
+        id "com.android.application" version "8.1.0"
+        id "com.google.gms.google-services" version "4.3.15"
+        id "com.onesignal.androidsdk.onesignal-gradle-plugin" version "0.14.0"
+    }
 }
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)

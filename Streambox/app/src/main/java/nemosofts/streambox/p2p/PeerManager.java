@@ -324,9 +324,7 @@ public class PeerManager {
 
         void cancelTimeout() {
             ScheduledFuture<?> t = timeout;
-            if (t != null) {
-                t.cancel(false);
-            }
+            if (t != null) t.cancel(false);
             timeout = null;
         }
 
@@ -336,9 +334,7 @@ public class PeerManager {
             cancelTimeout();
             peerId = null;
             triedPeers.clear();
-            for (SegmentCallback cb : arr) {
-                cb.onResult(true, data);
-            }
+            for (SegmentCallback cb : arr) cb.onResult(true, data);
         }
 
         void failAll() {
@@ -347,9 +343,7 @@ public class PeerManager {
             cancelTimeout();
             peerId = null;
             triedPeers.clear();
-            for (SegmentCallback cb : arr) {
-                cb.onResult(false, null);
-            }
+            for (SegmentCallback cb : arr) cb.onResult(false, null);
         }
     }
 
@@ -358,12 +352,8 @@ public class PeerManager {
         boolean dispatched;
         synchronized (state) {
             state.addCallback(cb);
-            if (timeoutMs > state.timeoutMs) {
-                state.timeoutMs = timeoutMs;
-            }
-            if (state.peerId != null) {
-                return;
-            }
+            if (timeoutMs > state.timeoutMs) state.timeoutMs = timeoutMs;
+            if (state.peerId != null) return;
             dispatched = attemptSegmentRequest(key.uri, state);
         }
         if (!dispatched && inflight.remove(key.uri, state)) {
@@ -374,9 +364,7 @@ public class PeerManager {
     private boolean attemptSegmentRequest(String uri, SegmentRequest state) {
         while (true) {
             String best = selectBestPeer(state.triedPeers);
-            if (best == null) {
-                return false;
-            }
+            if (best == null) return false;
 
             DataChannel dc = chans.get(best);
             if (dc == null || dc.state() != DataChannel.State.OPEN) {
@@ -402,10 +390,8 @@ public class PeerManager {
 
     private void onRequestTimeout(String uri, SegmentRequest state) {
         boolean retried;
-        synchronized (state) {
-            if (state.peerId == null) {
-                return;
-            }
+        synchronized (state)) {
+            if (state.peerId == null) return;
             state.triedPeers.add(state.peerId);
             state.peerId = null;
             state.timeout = null;
@@ -458,15 +444,12 @@ public class PeerManager {
                 MsgPiece piece = gson.fromJson(s, MsgPiece.class);
                 if (piece == null || piece.uri == null) break;
                 SegmentRequest state = inflight.get(piece.uri);
-                if (state == null || !from.equals(state.peerId)) {
-                    break;
-                }
+                if (state == null || !from.equals(state.peerId)) break;
+
                 boolean ok = piece.ok && piece.bytes != null && piece.bytes.length > 0;
                 if (ok) {
                     recv.merge(from, (long) piece.bytes.length, Long::sum);
-                    if (inflight.remove(piece.uri, state)) {
-                        state.complete(piece.bytes);
-                    }
+                    if (inflight.remove(piece.uri, state)) state.complete(piece.bytes);
                 } else {
                     boolean retried;
                     synchronized (state) {
@@ -477,3 +460,97 @@ public class PeerManager {
                     }
                     if (!retried && inflight.remove(piece.uri, state)) {
                         state.failAll();
+                    }
+                }
+                if (statsListener != null) statsListener.run();
+                break;
+            }
+            case "hello": {
+                MsgHello h = gson.fromJson(s, MsgHello.class);
+                country.put(from, h.country == null || h.country.isEmpty() ? "??" : h.country);
+                notifyPeersChanged();
+                break;
+            }
+            default:
+                break;
+        }
+    }
+
+    private static class Sig {
+        String type;
+        String streamId;
+        String senderId;
+        Payload payload;
+        Sig(String type, String streamId, String senderId, Payload payload) {
+            this.type = type; this.streamId = streamId; this.senderId = senderId; this.payload = payload;
+        }
+    }
+    private static class Payload {
+        String to;
+        String sdp;
+        IceCandidate cand;
+        String msg;
+        Payload(String to, String sdp, IceCandidate cand, String msg) {
+            this.to = to; this.sdp = sdp; this.cand = cand; this.msg = msg;
+        }
+    }
+
+    private static class MsgPing { String type="ping"; long ts; MsgPing(long ts){this.ts=ts;} }
+    private static class MsgPong { String type="pong"; long ts; MsgPong(long ts){this.ts=ts;} }
+    private static class MsgNeed { String type="need"; String uri; MsgNeed(String uri){this.uri=uri;} }
+    private static class MsgPiece {
+        String type="piece";
+        String uri;
+        byte[] bytes;
+        boolean ok = true;
+        MsgPiece() {}
+        MsgPiece(String uri, byte[] bytes){ this.uri=uri; this.bytes=bytes; this.ok = bytes != null && bytes.length > 0; }
+        static MsgPiece success(String uri, byte[] bytes) { return new MsgPiece(uri, bytes); }
+        static MsgPiece failure(String uri) { MsgPiece p = new MsgPiece(uri, null); p.ok = false; return p; }
+    }
+    private static class MsgHello { String type="hello"; String country; MsgHello(){} MsgHello(String country){this.country=country;} }
+    private static class MsgEnvelope { String type; }
+
+    static class HttpFetch {
+        private static final OkHttpClient CLIENT = new OkHttpClient();
+        static byte[] fetchBytes(String url) {
+            try {
+                okhttp3.Request req = new okhttp3.Request.Builder().url(url).build();
+                try (okhttp3.Response res = CLIENT.newCall(req).execute()) {
+                    if (!res.isSuccessful() || res.body() == null) return null;
+                    return res.body().bytes();
+                }
+            } catch (Exception e) {
+                return null;
+            }
+        }
+    }
+
+    private static class SimpleSdpObs implements SdpObserver {
+        private final String tag;
+        SimpleSdpObs(String tag) { this.tag = tag; }
+        @Override public void onCreateSuccess(SessionDescription sessionDescription) {}
+        @Override public void onSetSuccess() {}
+        @Override public void onCreateFailure(String s) { Log.e("SDP", tag + " onCreateFailure " + s); }
+        @Override public void onSetFailure(String s) { Log.e("SDP", tag + " onSetFailure " + s); }
+    }
+
+    public int getPeerCount() { return chans.size(); }
+    public long getAverageRtt() {
+        if (lastRtts.isEmpty()) return 0;
+        long sum = 0; int n = 0;
+        for (Long v : lastRtts.values()) { sum += v; n++; }
+        return n == 0 ? 0 : sum / n;
+    }
+    public long getTotalRecv() {
+        long sum = 0; for (Long v : recv.values()) sum += v; return sum;
+    }
+    public long getTotalSent() {
+        long sum = 0; for (Long v : sent.values()) sum += v; return sum;
+    }
+    public java.util.Map<String,Integer> getCountryCounts() {
+        java.util.Map<String,Integer> map = new java.util.HashMap<>();
+        for (String c : country.values()) map.put(c, map.getOrDefault(c, 0) + 1);
+        return map;
+    }
+}
