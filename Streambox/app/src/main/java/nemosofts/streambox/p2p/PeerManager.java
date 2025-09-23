@@ -18,7 +18,6 @@ import org.webrtc.SessionDescription;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Timer;
@@ -256,7 +255,12 @@ public class PeerManager {
         }
         if (best == null) { cb.onResult(false, null); return; }
 
-        waiting.computeIfAbsent(key.uri, k -> new CopyOnWriteArrayList<>()).add(cb);
+        CopyOnWriteArrayList<SegmentCallback> waiters =
+                waiting.computeIfAbsent(key.uri, k -> new CopyOnWriteArrayList<>());
+        waiters.add(cb);
+        if (waiters.size() > 1) {
+            return; // Request already in-flight for this segment.
+        }
 
         DataChannel dc = chans.get(best);
         MsgNeed need = new MsgNeed(key.uri);
@@ -274,39 +278,43 @@ public class PeerManager {
     private void handleDcMessage(String from, byte[] bytes) {
         String s = new String(bytes);
         if (s.startsWith("{\"type\":\"ping\"")) {
-            MsgPing ping = new Gson().fromJson(s, MsgPing.class);
+            MsgPing ping = gson.fromJson(s, MsgPing.class);
             DataChannel dc = chans.get(from);
             if (dc != null && dc.state() == DataChannel.State.OPEN) {
                 MsgPong pong = new MsgPong(ping.ts);
-                dc.send(new DataChannel.Buffer(ByteBuffer.wrap(new Gson().toJson(pong).getBytes()), false));
+                dc.send(new DataChannel.Buffer(ByteBuffer.wrap(gson.toJson(pong).getBytes()), false));
             }
         } else if (s.startsWith("{\"type\":\"pong\"")) {
-            MsgPong pong = new Gson().fromJson(s, MsgPong.class);
+            MsgPong pong = gson.fromJson(s, MsgPong.class);
             long rtt = Math.max(1, System.currentTimeMillis() - pong.ts);
             lastRtts.put(from, rtt);
             if (statsListener != null) statsListener.run();
         } else if (s.startsWith("{\"type\":\"need\"")) {
-            MsgNeed need = new Gson().fromJson(s, MsgNeed.class);
+            MsgNeed need = gson.fromJson(s, MsgNeed.class);
             byte[] payload = HttpFetch.fetchBytes(need.uri);
             DataChannel dc = chans.get(from);
             if (dc != null && dc.state() == DataChannel.State.OPEN && payload != null) {
-                MsgPiece piece = new MsgPiece(payload);
+                MsgPiece piece = new MsgPiece(need.uri, payload);
                 sent.merge(from, (long) payload.length, Long::sum);
-                dc.send(new DataChannel.Buffer(ByteBuffer.wrap(new Gson().toJson(piece).getBytes()), false));
+                dc.send(new DataChannel.Buffer(ByteBuffer.wrap(gson.toJson(piece).getBytes()), false));
                 if (statsListener != null) statsListener.run();
             }
         } else if (s.startsWith("{\"type\":\"piece\"")) {
-            MsgPiece piece = new Gson().fromJson(s, MsgPiece.class);
-            recv.merge(from, (long) piece.bytes.length, Long::sum);
-            // deliver to all waiting callbacks (simple model)
-            for (Map.Entry<String, CopyOnWriteArrayList<SegmentCallback>> e :
-                    new HashMap<>(waiting).entrySet()) {
-                CopyOnWriteArrayList<SegmentCallback> list = waiting.remove(e.getKey());
-                if (list != null) for (SegmentCallback c : list) c.onResult(true, piece.bytes);
+            MsgPiece piece = gson.fromJson(s, MsgPiece.class);
+            if (piece.bytes != null) {
+                recv.merge(from, (long) piece.bytes.length, Long::sum);
+            }
+            if (piece.uri != null) {
+                CopyOnWriteArrayList<SegmentCallback> list = waiting.remove(piece.uri);
+                if (list != null) {
+                    for (SegmentCallback c : list) {
+                        c.onResult(true, piece.bytes);
+                    }
+                }
             }
             if (statsListener != null) statsListener.run();
         } else if (s.startsWith("{\"type\":\"hello\"")) {
-            MsgHello h = new Gson().fromJson(s, MsgHello.class);
+            MsgHello h = gson.fromJson(s, MsgHello.class);
             country.put(from, h.country == null ? "??" : h.country);
             notifyPeersChanged();
         }
@@ -334,14 +342,15 @@ public class PeerManager {
     private static class MsgPing { String type="ping"; long ts; MsgPing(long ts){this.ts=ts;} }
     private static class MsgPong { String type="pong"; long ts; MsgPong(long ts){this.ts=ts;} }
     private static class MsgNeed { String type="need"; String uri; MsgNeed(String uri){this.uri=uri;} }
-    private static class MsgPiece { String type="piece"; byte[] bytes; MsgPiece(byte[] bytes){this.bytes=bytes;} }
+    private static class MsgPiece { String type="piece"; String uri; byte[] bytes; MsgPiece(String uri, byte[] bytes){this.uri=uri;this.bytes=bytes;} }
     private static class MsgHello { String type="hello"; String country; }
 
     static class HttpFetch {
+        private static final OkHttpClient CLIENT = new OkHttpClient();
         static byte[] fetchBytes(String url) {
             try {
                 okhttp3.Request req = new okhttp3.Request.Builder().url(url).build();
-                okhttp3.Response res = new OkHttpClient().newCall(req).execute();
+                okhttp3.Response res = CLIENT.newCall(req).execute();
                 if (!res.isSuccessful() || res.body() == null) return null;
                 return res.body().bytes();
             } catch (Exception e) {
