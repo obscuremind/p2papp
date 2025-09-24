@@ -67,7 +67,6 @@ public class PeerManager {
     private final Map<String, SegmentRequest> inflight = new ConcurrentHashMap<>();
     private final List<Runnable> peersChangedListeners = new CopyOnWriteArrayList<>();
     private Runnable statsListener;
-
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "p2p-timeouts");
         t.setDaemon(true);
@@ -116,7 +115,6 @@ public class PeerManager {
                     case "offer": onOffer(s); break;
                     case "answer": onAnswer(s); break;
                     case "candidate": onCandidate(s); break;
-                    default: break;
                 }
             }
         });
@@ -138,8 +136,8 @@ public class PeerManager {
             }
             @Override public void onConnectionChange(PeerConnection.PeerConnectionState newState) {
                 if (newState == PeerConnection.PeerConnectionState.DISCONNECTED ||
-                    newState == PeerConnection.PeerConnectionState.FAILED ||
-                    newState == PeerConnection.PeerConnectionState.CLOSED) {
+                        newState == PeerConnection.PeerConnectionState.FAILED ||
+                        newState == PeerConnection.PeerConnectionState.CLOSED) {
                     conns.remove(peerId);
                     chans.remove(peerId);
                     handlePeerClosed(peerId);
@@ -346,7 +344,6 @@ public class PeerManager {
         }
     }
 
-    // Expects a SegmentKey class with a public String uri;
     public void requestSegment(SegmentKey key, long timeoutMs, SegmentCallback cb) {
         SegmentRequest state = inflight.computeIfAbsent(key.uri, uri -> new SegmentRequest(timeoutMs));
         boolean dispatched;
@@ -471,8 +468,6 @@ public class PeerManager {
                 notifyPeersChanged();
                 break;
             }
-            default:
-                break;
         }
     }
 
