@@ -67,6 +67,7 @@ public class PeerManager {
     private final Map<String, SegmentRequest> inflight = new ConcurrentHashMap<>();
     private final List<Runnable> peersChangedListeners = new CopyOnWriteArrayList<>();
     private Runnable statsListener;
+
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "p2p-timeouts");
         t.setDaemon(true);
@@ -133,8 +134,6 @@ public class PeerManager {
 
         PeerConnection pc = factory.createPeerConnection(cfg, new PeerConnection.Observer() {
             @Override public void onIceCandidate(IceCandidate candidate) {
-                    // pass
-
                 send(new Sig("candidate", streamId, selfId, new Payload(peerId, null, candidate, null)));
             }
             @Override public void onConnectionChange(PeerConnection.PeerConnectionState newState) {
@@ -152,7 +151,7 @@ public class PeerManager {
             @Override public void onIceConnectionChange(PeerConnection.IceConnectionState newState) {}
             @Override public void onIceConnectionReceivingChange(boolean b) {}
             @Override public void onIceGatheringChange(PeerConnection.IceGatheringState newState) {}
-                @Override public void onIceCandidatesRemoved(IceCandidate[] candidates) {}
+            @Override public void onIceCandidatesRemoved(IceCandidate[] candidates) {}
             @Override public void onAddStream(org.webrtc.MediaStream stream) {}
             @Override public void onRemoveStream(org.webrtc.MediaStream stream) {}
             @Override public void onRenegotiationNeeded() {}
@@ -318,17 +317,13 @@ public class PeerManager {
         volatile ScheduledFuture<?> timeout;
         long timeoutMs;
 
-        SegmentRequest(long timeoutMs) {
-            this.timeoutMs = timeoutMs;
-        }
+        SegmentRequest(long timeoutMs) { this.timeoutMs = timeoutMs; }
 
         void addCallback(SegmentCallback cb) { callbacks.add(cb); }
 
         void cancelTimeout() {
             ScheduledFuture<?> t = timeout;
-            if (t != null) {
-                t.cancel(false);
-            }
+            if (t != null) t.cancel(false);
             timeout = null;
         }
 
@@ -338,9 +333,7 @@ public class PeerManager {
             cancelTimeout();
             peerId = null;
             triedPeers.clear();
-            for (SegmentCallback cb : arr) {
-                cb.onResult(true, data);
-            }
+            for (SegmentCallback cb : arr) cb.onResult(true, data);
         }
 
         void failAll() {
@@ -349,23 +342,18 @@ public class PeerManager {
             cancelTimeout();
             peerId = null;
             triedPeers.clear();
-            for (SegmentCallback cb : arr) {
-                cb.onResult(false, null);
-            }
+            for (SegmentCallback cb : arr) cb.onResult(false, null);
         }
     }
 
+    // Expects a SegmentKey class with a public String uri;
     public void requestSegment(SegmentKey key, long timeoutMs, SegmentCallback cb) {
         SegmentRequest state = inflight.computeIfAbsent(key.uri, uri -> new SegmentRequest(timeoutMs));
         boolean dispatched;
         synchronized (state) {
             state.addCallback(cb);
-            if (timeoutMs > state.timeoutMs) {
-                state.timeoutMs = timeoutMs;
-            }
-            if (state.peerId != null) {
-                return;
-            }
+            if (timeoutMs > state.timeoutMs) state.timeoutMs = timeoutMs;
+            if (state.peerId != null) return;
             dispatched = attemptSegmentRequest(key.uri, state);
         }
         if (!dispatched && inflight.remove(key.uri, state)) {
@@ -376,9 +364,7 @@ public class PeerManager {
     private boolean attemptSegmentRequest(String uri, SegmentRequest state) {
         while (true) {
             String best = selectBestPeer(state.triedPeers);
-            if (best == null) {
-                return false;
-            }
+            if (best == null) return false;
 
             DataChannel dc = chans.get(best);
             if (dc == null || dc.state() != DataChannel.State.OPEN) {
@@ -405,9 +391,7 @@ public class PeerManager {
     private void onRequestTimeout(String uri, SegmentRequest state) {
         boolean retried;
         synchronized (state) {
-            if (state.peerId == null) {
-                return;
-            }
+            if (state.peerId == null) return;
             state.triedPeers.add(state.peerId);
             state.peerId = null;
             state.timeout = null;
@@ -460,15 +444,12 @@ public class PeerManager {
                 MsgPiece piece = gson.fromJson(s, MsgPiece.class);
                 if (piece == null || piece.uri == null) break;
                 SegmentRequest state = inflight.get(piece.uri);
-                if (state == null || !from.equals(state.peerId)) {
-                    break;
-                }
+                if (state == null || !from.equals(state.peerId)) break;
+
                 boolean ok = piece.ok && piece.bytes != null && piece.bytes.length > 0;
                 if (ok) {
                     recv.merge(from, (long) piece.bytes.length, Long::sum);
-                    if (inflight.remove(piece.uri, state)) {
-                        state.complete(piece.bytes);
-                    }
+                    if (inflight.remove(piece.uri, state)) state.complete(piece.bytes);
                 } else {
                     boolean retried;
                     synchronized (state) {
@@ -504,6 +485,7 @@ public class PeerManager {
             this.type = type; this.streamId = streamId; this.senderId = senderId; this.payload = payload;
         }
     }
+
     private static class Payload {
         String to;
         String sdp;
@@ -517,20 +499,18 @@ public class PeerManager {
     private static class MsgPing { String type="ping"; long ts; MsgPing(long ts){this.ts=ts;} }
     private static class MsgPong { String type="pong"; long ts; MsgPong(long ts){this.ts=ts;} }
     private static class MsgNeed { String type="need"; String uri; MsgNeed(String uri){this.uri=uri;} }
+
     private static class MsgPiece {
         String type="piece";
         String uri;
         byte[] bytes;
         boolean ok = true;
         MsgPiece() {}
-        MsgPiece(String uri, byte[] bytes){this.uri=uri;this.bytes=bytes; this.ok = bytes != null && bytes.length > 0;}
+        MsgPiece(String uri, byte[] bytes){ this.uri=uri; this.bytes=bytes; this.ok = bytes != null && bytes.length > 0; }
         static MsgPiece success(String uri, byte[] bytes) { return new MsgPiece(uri, bytes); }
-        static MsgPiece failure(String uri) {
-            MsgPiece p = new MsgPiece(uri, null);
-            p.ok = false;
-            return p;
-        }
+        static MsgPiece failure(String uri) { MsgPiece p = new MsgPiece(uri, null); p.ok = false; return p; }
     }
+
     private static class MsgHello { String type="hello"; String country; MsgHello(){} MsgHello(String country){this.country=country;} }
     private static class MsgEnvelope { String type; }
 
@@ -558,30 +538,25 @@ public class PeerManager {
         @Override public void onSetFailure(String s) { Log.e("SDP", tag + " onSetFailure " + s); }
     }
 
-        public int getPeerCount() { return chans.size(); }
-        public long getAverageRtt() {
-            if (lastRtts.isEmpty()) return 0;
-            long sum = 0;
-            int n = 0;
-            for (Long v : lastRtts.values()) { sum += v; n++; }
-            return n == 0 ? 0 : sum / n;
-        }
-        public long getTotalRecv() {
-            long sum = 0;
-            for (Long v : recv.values()) sum += v;
-            return sum;
-        }
-        public long getTotalSent() {
-            long sum = 0;
-            for (Long v : sent.values()) sum += v;
-            return sum;
-        }
-        public java.util.Map<String,Integer> getCountryCounts() {
-            java.util.Map<String,Integer> map = new java.util.HashMap<>();
-            for (String c : country.values()) {
-                map.put(c, map.getOrDefault(c, 0) + 1);
-            }
-            return map;
-        }
-    
+    public int getPeerCount() { return chans.size(); }
+    public long getAverageRtt() {
+        if (lastRtts.isEmpty()) return 0;
+        long sum = 0; int n = 0;
+        for (Long v : lastRtts.values()) { sum += v; n++; }
+        return n == 0 ? 0 : sum / n;
+    }
+    public long getTotalRecv() {
+        long sum = 0; for (Long v : recv.values()) sum += v; return sum;
+    }
+    public long getTotalSent() {
+        long sum = 0; for (Long v : sent.values()) sum += v; return sum;
+    }
+    public java.util.Map<String,Integer> getCountryCounts() {
+        java.util.Map<String,Integer> map = new java.util.HashMap<>();
+        for (String c : country.values()) map.put(c, map.getOrDefault(c, 0) + 1);
+        return map;
+    }
+
+    // Placeholder for your key type (if you don't already have it).
+    public static class SegmentKey { public final String uri; public SegmentKey(String uri){ this.uri=uri; } }
 }
