@@ -1,7 +1,7 @@
 plugins {
+    id 'com.onesignal.androidsdk.onesignal-gradle-plugin'
     id 'com.android.application'
     id 'com.google.gms.google-services'
-    id 'com.onesignal.androidsdk.onesignal-gradle-plugin'
 }
 
 android {
@@ -52,7 +52,7 @@ dependencies {
     implementation 'com.google.android.material:material:1.9.0'
     implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
     testImplementation 'junit:junit:4.13.2'
-    implementation files('libs/library.aar')
+    implementation files('../libs/library.aar')
     implementation 'androidx.multidex:multidex:2.0.1'
     implementation "androidx.recyclerview:recyclerview:1.3.1"
     // Encrypt and Decrypt
@@ -62,12 +62,12 @@ dependencies {
     // Clear cache data
     implementation 'commons-io:commons-io:2.13.0'
     // Analytics
-    implementation platform('com.google.firebase:firebase-bom:32.3.0')
-    implementation 'com.google.firebase:firebase-analytics:21.3.0'
+    implementation(platform('com.google.firebase:firebase-bom:32.3.0'))
+    implementation('com.google.firebase:firebase-analytics:21.3.0')
     // In app Messaging
-    implementation 'com.google.firebase:firebase-inappmessaging-display:20.3.4'
+    implementation('com.google.firebase:firebase-inappmessaging-display:20.3.4')
     // Push notification
-    implementation 'com.onesignal:OneSignal:4.8.6'
+    implementation 'com.onesignal:OneSignal:4.8.6' //4.8.6
     // Exoplayer Media3
     implementation "androidx.media3:media3-exoplayer:1.1.1"
     implementation "androidx.media3:media3-exoplayer-dash:1.1.1"
@@ -75,7 +75,6 @@ dependencies {
     implementation "androidx.media3:media3-exoplayer-smoothstreaming:1.1.1"
     implementation "androidx.media3:media3-exoplayer-rtsp:1.1.1"
     implementation "androidx.media3:media3-ui:1.1.1"
-
     androidTestImplementation 'androidx.test.ext:junit:1.1.5'
     androidTestImplementation 'androidx.test.espresso:espresso-core:3.5.1'
 }

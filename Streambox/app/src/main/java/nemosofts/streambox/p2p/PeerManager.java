@@ -67,6 +67,7 @@ public class PeerManager {
     private final Map<String, SegmentRequest> inflight = new ConcurrentHashMap<>();
     private final List<Runnable> peersChangedListeners = new CopyOnWriteArrayList<>();
     private Runnable statsListener;
+
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "p2p-timeouts");
         t.setDaemon(true);
@@ -316,9 +317,7 @@ public class PeerManager {
         volatile ScheduledFuture<?> timeout;
         long timeoutMs;
 
-        SegmentRequest(long timeoutMs) {
-            this.timeoutMs = timeoutMs;
-        }
+        SegmentRequest(long timeoutMs) { this.timeoutMs = timeoutMs; }
 
         void addCallback(SegmentCallback cb) { callbacks.add(cb); }
 
@@ -347,6 +346,7 @@ public class PeerManager {
         }
     }
 
+    // Expects a SegmentKey class with a public String uri;
     public void requestSegment(SegmentKey key, long timeoutMs, SegmentCallback cb) {
         SegmentRequest state = inflight.computeIfAbsent(key.uri, uri -> new SegmentRequest(timeoutMs));
         boolean dispatched;
@@ -390,7 +390,7 @@ public class PeerManager {
 
     private void onRequestTimeout(String uri, SegmentRequest state) {
         boolean retried;
-        synchronized (state)) {
+        synchronized (state) {
             if (state.peerId == null) return;
             state.triedPeers.add(state.peerId);
             state.peerId = null;
@@ -485,6 +485,7 @@ public class PeerManager {
             this.type = type; this.streamId = streamId; this.senderId = senderId; this.payload = payload;
         }
     }
+
     private static class Payload {
         String to;
         String sdp;
@@ -498,6 +499,7 @@ public class PeerManager {
     private static class MsgPing { String type="ping"; long ts; MsgPing(long ts){this.ts=ts;} }
     private static class MsgPong { String type="pong"; long ts; MsgPong(long ts){this.ts=ts;} }
     private static class MsgNeed { String type="need"; String uri; MsgNeed(String uri){this.uri=uri;} }
+
     private static class MsgPiece {
         String type="piece";
         String uri;
@@ -508,6 +510,7 @@ public class PeerManager {
         static MsgPiece success(String uri, byte[] bytes) { return new MsgPiece(uri, bytes); }
         static MsgPiece failure(String uri) { MsgPiece p = new MsgPiece(uri, null); p.ok = false; return p; }
     }
+
     private static class MsgHello { String type="hello"; String country; MsgHello(){} MsgHello(String country){this.country=country;} }
     private static class MsgEnvelope { String type; }
 
@@ -553,4 +556,7 @@ public class PeerManager {
         for (String c : country.values()) map.put(c, map.getOrDefault(c, 0) + 1);
         return map;
     }
+
+    // Placeholder for your key type (if you don't already have it).
+    public static class SegmentKey { public final String uri; public SegmentKey(String uri){ this.uri=uri; } }
 }
