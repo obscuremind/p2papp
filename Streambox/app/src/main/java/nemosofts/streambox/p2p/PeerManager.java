@@ -18,14 +18,18 @@ import org.webrtc.SessionDescription;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
-import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
-import java.util.Timer;
-import java.util.TimerTask;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
@@ -60,9 +64,14 @@ public class PeerManager {
     private final Map<String, Long> sent = new ConcurrentHashMap<>();
     private final Map<String, Long> recv = new ConcurrentHashMap<>();
     private final Map<String, String> country = new ConcurrentHashMap<>();
-    private final Map<String, CopyOnWriteArrayList<SegmentCallback>> waiting = new ConcurrentHashMap<>();
+    private final Map<String, SegmentRequest> inflight = new ConcurrentHashMap<>();
     private final List<Runnable> peersChangedListeners = new CopyOnWriteArrayList<>();
     private Runnable statsListener;
+    private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "p2p-timeouts");
+        t.setDaemon(true);
+        return t;
+    });
 
     private PeerManager(Context ctx, String signalingUrl, String streamId) {
         this.signalingUrl = signalingUrl;
@@ -134,6 +143,7 @@ public class PeerManager {
                     newState == PeerConnection.PeerConnectionState.CLOSED) {
                     conns.remove(peerId);
                     chans.remove(peerId);
+                    handlePeerClosed(peerId);
                     notifyPeersChanged();
                 }
             }
@@ -161,8 +171,18 @@ public class PeerManager {
     private void setupChannel(String peerId, DataChannel dc) {
         chans.put(peerId, dc);
         dc.registerObserver(new DataChannel.Observer() {
+            private boolean helloSent;
             @Override public void onBufferedAmountChange(long previousAmount) {}
-            @Override public void onStateChange() {}
+            @Override public void onStateChange() {
+                if (dc.state() == DataChannel.State.OPEN && !helloSent) {
+                    helloSent = true;
+                    sendHello(peerId, dc);
+                }
+                if (dc.state() == DataChannel.State.CLOSED) {
+                    handlePeerClosed(peerId);
+                }
+                notifyPeersChanged();
+            }
             @Override public void onMessage(DataChannel.Buffer buffer) {
                 ByteBuffer buf = buffer.data;
                 byte[] bytes = new byte[buf.remaining()];
@@ -171,6 +191,15 @@ public class PeerManager {
             }
         });
         notifyPeersChanged();
+    }
+
+    private void sendHello(String peerId, DataChannel dc) {
+        String countryCode = Locale.getDefault().getCountry();
+        if (countryCode == null || countryCode.isEmpty()) {
+            countryCode = "??";
+        }
+        MsgHello hello = new MsgHello(countryCode);
+        dc.send(new DataChannel.Buffer(ByteBuffer.wrap(gson.toJson(hello).getBytes()), false));
     }
 
     private void startNegotiation(String otherId) {
@@ -227,88 +256,242 @@ public class PeerManager {
 
     private void notifyPeersChanged() { for (Runnable r : peersChangedListeners) r.run(); }
 
-    private void startPinger() {
-        new Timer(true).scheduleAtFixedRate(new TimerTask() {
-            @Override public void run() {
-                long now = System.currentTimeMillis();
-                for (Map.Entry<String, DataChannel> e : chans.entrySet()) {
-                    String pid = e.getKey();
-                    DataChannel dc = e.getValue();
-                    if (dc.state() != DataChannel.State.OPEN) continue;
-                    MsgPing ping = new MsgPing(now);
-                    byte[] b = gson.toJson(ping).getBytes();
-                    dc.send(new DataChannel.Buffer(ByteBuffer.wrap(b), false));
+    private void handlePeerClosed(String peerId) {
+        lastRtts.remove(peerId);
+        sent.remove(peerId);
+        recv.remove(peerId);
+        country.remove(peerId);
+        for (Map.Entry<String, SegmentRequest> e : inflight.entrySet()) {
+            SegmentRequest state = e.getValue();
+            if (peerId.equals(state.peerId)) {
+                boolean retried;
+                synchronized (state) {
+                    state.cancelTimeout();
+                    state.triedPeers.add(peerId);
+                    state.peerId = null;
+                    retried = attemptSegmentRequest(e.getKey(), state);
+                }
+                if (!retried && inflight.remove(e.getKey(), state)) {
+                    state.failAll();
                 }
             }
-        }, 1000, 2000);
+        }
+    }
+
+    private void startPinger() {
+        scheduler.scheduleAtFixedRate(() -> {
+            long now = System.currentTimeMillis();
+            for (Map.Entry<String, DataChannel> e : chans.entrySet()) {
+                String pid = e.getKey();
+                DataChannel dc = e.getValue();
+                if (dc.state() != DataChannel.State.OPEN) continue;
+                MsgPing ping = new MsgPing(now);
+                byte[] b = gson.toJson(ping).getBytes();
+                dc.send(new DataChannel.Buffer(ByteBuffer.wrap(b), false));
+            }
+        }, 1, 2, TimeUnit.SECONDS);
     }
 
     public interface SegmentCallback { void onResult(boolean ok, byte[] bytes); }
 
-    public void requestSegment(SegmentKey key, long timeoutMs, SegmentCallback cb) {
+    private String selectBestPeer(Set<String> exclude) {
         String best = null;
         long bestRtt = Long.MAX_VALUE;
-        for (String pid : chans.keySet()) {
-            DataChannel dc = chans.get(pid);
+        for (Map.Entry<String, DataChannel> entry : chans.entrySet()) {
+            String pid = entry.getKey();
+            if (exclude != null && exclude.contains(pid)) continue;
+            DataChannel dc = entry.getValue();
             if (dc.state() != DataChannel.State.OPEN) continue;
-            long r = lastRtts.getOrDefault(pid, 9999L);
-            if (r < bestRtt) { bestRtt = r; best = pid; }
-        }
-        if (best == null) { cb.onResult(false, null); return; }
-
-        waiting.computeIfAbsent(key.uri, k -> new CopyOnWriteArrayList<>()).add(cb);
-
-        DataChannel dc = chans.get(best);
-        MsgNeed need = new MsgNeed(key.uri);
-        byte[] b = gson.toJson(need).getBytes();
-        dc.send(new DataChannel.Buffer(ByteBuffer.wrap(b), false));
-
-        new java.util.Timer(true).schedule(new java.util.TimerTask() {
-            @Override public void run() {
-                CopyOnWriteArrayList<SegmentCallback> list = waiting.remove(key.uri);
-                if (list != null) for (SegmentCallback c : list) c.onResult(false, null);
+            long rtt = lastRtts.getOrDefault(pid, 9_999L);
+            if (rtt < bestRtt) {
+                bestRtt = rtt;
+                best = pid;
             }
-        }, timeoutMs);
+        }
+        return best;
+    }
+
+    private static class SegmentRequest {
+        private final CopyOnWriteArrayList<SegmentCallback> callbacks = new CopyOnWriteArrayList<>();
+        private final Set<String> triedPeers = new HashSet<>();
+        volatile String peerId;
+        volatile ScheduledFuture<?> timeout;
+        long timeoutMs;
+
+        SegmentRequest(long timeoutMs) {
+            this.timeoutMs = timeoutMs;
+        }
+
+        void addCallback(SegmentCallback cb) { callbacks.add(cb); }
+
+        void cancelTimeout() {
+            ScheduledFuture<?> t = timeout;
+            if (t != null) {
+                t.cancel(false);
+            }
+            timeout = null;
+        }
+
+        void complete(byte[] data) {
+            SegmentCallback[] arr = callbacks.toArray(new SegmentCallback[0]);
+            callbacks.clear();
+            cancelTimeout();
+            peerId = null;
+            triedPeers.clear();
+            for (SegmentCallback cb : arr) {
+                cb.onResult(true, data);
+            }
+        }
+
+        void failAll() {
+            SegmentCallback[] arr = callbacks.toArray(new SegmentCallback[0]);
+            callbacks.clear();
+            cancelTimeout();
+            peerId = null;
+            triedPeers.clear();
+            for (SegmentCallback cb : arr) {
+                cb.onResult(false, null);
+            }
+        }
+    }
+
+    public void requestSegment(SegmentKey key, long timeoutMs, SegmentCallback cb) {
+        SegmentRequest state = inflight.computeIfAbsent(key.uri, uri -> new SegmentRequest(timeoutMs));
+        boolean dispatched;
+        synchronized (state) {
+            state.addCallback(cb);
+            if (timeoutMs > state.timeoutMs) {
+                state.timeoutMs = timeoutMs;
+            }
+            if (state.peerId != null) {
+                return;
+            }
+            dispatched = attemptSegmentRequest(key.uri, state);
+        }
+        if (!dispatched && inflight.remove(key.uri, state)) {
+            state.failAll();
+        }
+    }
+
+    private boolean attemptSegmentRequest(String uri, SegmentRequest state) {
+        while (true) {
+            String best = selectBestPeer(state.triedPeers);
+            if (best == null) {
+                return false;
+            }
+
+            DataChannel dc = chans.get(best);
+            if (dc == null || dc.state() != DataChannel.State.OPEN) {
+                state.triedPeers.add(best);
+                continue;
+            }
+
+            MsgNeed need = new MsgNeed(uri);
+            byte[] payload = gson.toJson(need).getBytes();
+            boolean sentOk = dc.send(new DataChannel.Buffer(ByteBuffer.wrap(payload), false));
+            if (!sentOk) {
+                state.triedPeers.add(best);
+                continue;
+            }
+
+            state.peerId = best;
+            state.triedPeers.add(best);
+            state.timeout = scheduler.schedule(() -> onRequestTimeout(uri, state),
+                    state.timeoutMs, TimeUnit.MILLISECONDS);
+            return true;
+        }
+    }
+
+    private void onRequestTimeout(String uri, SegmentRequest state) {
+        boolean retried;
+        synchronized (state) {
+            if (state.peerId == null) {
+                return;
+            }
+            state.triedPeers.add(state.peerId);
+            state.peerId = null;
+            state.timeout = null;
+            retried = attemptSegmentRequest(uri, state);
+        }
+        if (!retried && inflight.remove(uri, state)) {
+            state.failAll();
+        }
     }
 
     private void handleDcMessage(String from, byte[] bytes) {
         String s = new String(bytes);
-        if (s.startsWith("{\"type\":\"ping\"")) {
-            MsgPing ping = new Gson().fromJson(s, MsgPing.class);
-            DataChannel dc = chans.get(from);
-            if (dc != null && dc.state() == DataChannel.State.OPEN) {
-                MsgPong pong = new MsgPong(ping.ts);
-                dc.send(new DataChannel.Buffer(ByteBuffer.wrap(new Gson().toJson(pong).getBytes()), false));
+        MsgEnvelope env = gson.fromJson(s, MsgEnvelope.class);
+        if (env == null || env.type == null) return;
+        switch (env.type) {
+            case "ping": {
+                MsgPing ping = gson.fromJson(s, MsgPing.class);
+                DataChannel dc = chans.get(from);
+                if (dc != null && dc.state() == DataChannel.State.OPEN) {
+                    MsgPong pong = new MsgPong(ping.ts);
+                    dc.send(new DataChannel.Buffer(ByteBuffer.wrap(gson.toJson(pong).getBytes()), false));
+                }
+                break;
             }
-        } else if (s.startsWith("{\"type\":\"pong\"")) {
-            MsgPong pong = new Gson().fromJson(s, MsgPong.class);
-            long rtt = Math.max(1, System.currentTimeMillis() - pong.ts);
-            lastRtts.put(from, rtt);
-            if (statsListener != null) statsListener.run();
-        } else if (s.startsWith("{\"type\":\"need\"")) {
-            MsgNeed need = new Gson().fromJson(s, MsgNeed.class);
-            byte[] payload = HttpFetch.fetchBytes(need.uri);
-            DataChannel dc = chans.get(from);
-            if (dc != null && dc.state() == DataChannel.State.OPEN && payload != null) {
-                MsgPiece piece = new MsgPiece(payload);
-                sent.merge(from, (long) payload.length, Long::sum);
-                dc.send(new DataChannel.Buffer(ByteBuffer.wrap(new Gson().toJson(piece).getBytes()), false));
+            case "pong": {
+                MsgPong pong = gson.fromJson(s, MsgPong.class);
+                long rtt = Math.max(1, System.currentTimeMillis() - pong.ts);
+                lastRtts.put(from, rtt);
                 if (statsListener != null) statsListener.run();
+                break;
             }
-        } else if (s.startsWith("{\"type\":\"piece\"")) {
-            MsgPiece piece = new Gson().fromJson(s, MsgPiece.class);
-            recv.merge(from, (long) piece.bytes.length, Long::sum);
-            // deliver to all waiting callbacks (simple model)
-            for (Map.Entry<String, CopyOnWriteArrayList<SegmentCallback>> e :
-                    new HashMap<>(waiting).entrySet()) {
-                CopyOnWriteArrayList<SegmentCallback> list = waiting.remove(e.getKey());
-                if (list != null) for (SegmentCallback c : list) c.onResult(true, piece.bytes);
+            case "need": {
+                MsgNeed need = gson.fromJson(s, MsgNeed.class);
+                if (need == null || need.uri == null) break;
+                byte[] payload = HttpFetch.fetchBytes(need.uri);
+                DataChannel dc = chans.get(from);
+                if (dc != null && dc.state() == DataChannel.State.OPEN) {
+                    MsgPiece piece = (payload != null && payload.length > 0)
+                            ? MsgPiece.success(need.uri, payload)
+                            : MsgPiece.failure(need.uri);
+                    if (payload != null && payload.length > 0) {
+                        sent.merge(from, (long) payload.length, Long::sum);
+                    }
+                    dc.send(new DataChannel.Buffer(ByteBuffer.wrap(gson.toJson(piece).getBytes()), false));
+                    if (statsListener != null && payload != null && payload.length > 0) statsListener.run();
+                }
+                break;
             }
-            if (statsListener != null) statsListener.run();
-        } else if (s.startsWith("{\"type\":\"hello\"")) {
-            MsgHello h = new Gson().fromJson(s, MsgHello.class);
-            country.put(from, h.country == null ? "??" : h.country);
-            notifyPeersChanged();
+            case "piece": {
+                MsgPiece piece = gson.fromJson(s, MsgPiece.class);
+                if (piece == null || piece.uri == null) break;
+                SegmentRequest state = inflight.get(piece.uri);
+                if (state == null || !from.equals(state.peerId)) {
+                    break;
+                }
+                boolean ok = piece.ok && piece.bytes != null && piece.bytes.length > 0;
+                if (ok) {
+                    recv.merge(from, (long) piece.bytes.length, Long::sum);
+                    if (inflight.remove(piece.uri, state)) {
+                        state.complete(piece.bytes);
+                    }
+                } else {
+                    boolean retried;
+                    synchronized (state) {
+                        state.cancelTimeout();
+                        state.triedPeers.add(from);
+                        state.peerId = null;
+                        retried = attemptSegmentRequest(piece.uri, state);
+                    }
+                    if (!retried && inflight.remove(piece.uri, state)) {
+                        state.failAll();
+                    }
+                }
+                if (statsListener != null) statsListener.run();
+                break;
+            }
+            case "hello": {
+                MsgHello h = gson.fromJson(s, MsgHello.class);
+                country.put(from, h.country == null || h.country.isEmpty() ? "??" : h.country);
+                notifyPeersChanged();
+                break;
+            }
+            default:
+                break;
         }
     }
 
@@ -334,16 +517,32 @@ public class PeerManager {
     private static class MsgPing { String type="ping"; long ts; MsgPing(long ts){this.ts=ts;} }
     private static class MsgPong { String type="pong"; long ts; MsgPong(long ts){this.ts=ts;} }
     private static class MsgNeed { String type="need"; String uri; MsgNeed(String uri){this.uri=uri;} }
-    private static class MsgPiece { String type="piece"; byte[] bytes; MsgPiece(byte[] bytes){this.bytes=bytes;} }
-    private static class MsgHello { String type="hello"; String country; }
+    private static class MsgPiece {
+        String type="piece";
+        String uri;
+        byte[] bytes;
+        boolean ok = true;
+        MsgPiece() {}
+        MsgPiece(String uri, byte[] bytes){this.uri=uri;this.bytes=bytes; this.ok = bytes != null && bytes.length > 0;}
+        static MsgPiece success(String uri, byte[] bytes) { return new MsgPiece(uri, bytes); }
+        static MsgPiece failure(String uri) {
+            MsgPiece p = new MsgPiece(uri, null);
+            p.ok = false;
+            return p;
+        }
+    }
+    private static class MsgHello { String type="hello"; String country; MsgHello(){} MsgHello(String country){this.country=country;} }
+    private static class MsgEnvelope { String type; }
 
     static class HttpFetch {
+        private static final OkHttpClient CLIENT = new OkHttpClient();
         static byte[] fetchBytes(String url) {
             try {
                 okhttp3.Request req = new okhttp3.Request.Builder().url(url).build();
-                okhttp3.Response res = new OkHttpClient().newCall(req).execute();
-                if (!res.isSuccessful() || res.body() == null) return null;
-                return res.body().bytes();
+                try (okhttp3.Response res = CLIENT.newCall(req).execute()) {
+                    if (!res.isSuccessful() || res.body() == null) return null;
+                    return res.body().bytes();
+                }
             } catch (Exception e) {
                 return null;
             }
