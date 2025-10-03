@@ -43,6 +43,7 @@ import java.net.CookiePolicy;
 
 import nemosofts.streambox.R;
 import nemosofts.streambox.Util.ApplicationUtil;
+import nemosofts.streambox.Util.CloudSyncManager;
 import nemosofts.streambox.Util.SharedPref;
 import nemosofts.streambox.Util.helper.DBHelper;
 import nemosofts.streambox.Util.player.BrightnessVolumeControl;
@@ -250,7 +251,33 @@ public class PlayerMovieActivity extends AppCompatActivity {
     public void onDestroy() {
         super.onDestroy();
         if (exoPlayer != null) {
-            dbHelper.addToSeekMovie(String.valueOf(getCurrentSeekPosition()), stream_id, movie_name);
+            long currentPosition = getCurrentSeekPosition();
+            long duration = exoPlayer.getDuration();
+
+            dbHelper.addToSeekMovie(String.valueOf(currentPosition), stream_id, movie_name);
+
+            CloudSyncManager.getInstance(this).updateWatchHistory(
+                "movie",
+                stream_id,
+                stream_id,
+                movie_name,
+                "",
+                currentPosition,
+                duration,
+                "",
+                0,
+                0,
+                new CloudSyncManager.SyncCallback() {
+                    @Override
+                    public void onSuccess(String result) {
+                    }
+
+                    @Override
+                    public void onError(String error) {
+                    }
+                }
+            );
+
             exoPlayer.setPlayWhenReady(false);
             exoPlayer.stop();
             exoPlayer.release();

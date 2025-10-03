@@ -27,6 +27,7 @@ import java.util.ArrayList;
 
 import nemosofts.streambox.R;
 import nemosofts.streambox.Util.ApplicationUtil;
+import nemosofts.streambox.Util.CloudSyncManager;
 import nemosofts.streambox.Util.SharedPref;
 import nemosofts.streambox.Util.helper.DBHelper;
 import nemosofts.streambox.Util.helper.Helper;
@@ -230,6 +231,22 @@ public class SignInActivity extends AppCompatActivity {
                             Callback.customAdCount = 0;
                             Callback.customAdShow = 15;
                             Callback.is_load_ads = true;
+
+                            CloudSyncManager.getInstance(SignInActivity.this).initializeUser(
+                                username,
+                                et_url.getText().toString(),
+                                et_any_name.getText().toString(),
+                                new CloudSyncManager.SyncCallback() {
+                                    @Override
+                                    public void onSuccess(String result) {
+                                        CloudSyncManager.getInstance(SignInActivity.this).setUserId(result);
+                                    }
+
+                                    @Override
+                                    public void onError(String error) {
+                                    }
+                                }
+                            );
 
                             Toast.makeText(SignInActivity.this, "Login successfully.", Toast.LENGTH_SHORT).show();
                         } catch (Exception e) {
